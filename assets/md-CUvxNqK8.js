@@ -1,0 +1,5 @@
+import{$ as e,B as t,D as n,b as r,bt as i,v as a,vt as o,y as s}from"./modules/shiki-C5qzaLuC.js";import{nt as c,tt as l}from"./index-DeR0q6Mc.js";import{t as u}from"./vt-default-CbpWEu71.js";var d={__name:`Lec6-1_slides.md__slidev_2`,setup(d){let{$slidev:f,$nav:p,$clicksContext:m,$clicks:h,$page:g,$renderContext:_,$frontmatter:v}=c();return m.setup(),(c,d)=>(t(),s(u,i(n(o(l)(o(v),1))),{default:e(()=>[d[0]||=a(`h1`,null,`Learning Objectives`,-1),r(`
+<div class="mt-12 text-2xl text-left mb-6">
+#  By the end of this lecture, you should be able to:
+</div>
+`),d[1]||=a(`ul`,{class:`list-disc pl-10 space-y-1.5 text-xl`},[a(`li`,null,`Explain how the previous modules fit together within a complete modeling workflow.`),a(`li`,null,`Identify when each modeling method is appropriate.`),a(`li`,null,`Understand the relationships among supervised, unsupervised, and ensemble methods.`),a(`li`,null,`Recognize how upcoming topics (Ensembles, SVMs/CNNs, etc.) extend the modeling toolkit.`),a(`li`,null,`Develop a conceptual roadmap for end-to-end data science projects.`)],-1)]),_:1},16))}};export{d as default};
