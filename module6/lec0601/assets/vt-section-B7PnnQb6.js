@@ -1,0 +1,1 @@
+import{B as e,U as t,x as n}from"./modules/shiki-C5qzaLuC.js";import{nt as r,xt as i}from"./index-C_K6P5B8.js";var a={class:`section`},o=i({__name:`vt-section`,setup(i){let{$slidev:o,$nav:s,$clicksContext:c,$clicks:l,$page:u,$renderContext:d,$frontmatter:f}=r();return(r,i)=>(e(),n(`div`,a,[t(r.$slots,`default`,{},void 0,!0)]))}},[[`__scopeId`,`data-v-34225b36`]]);export{o as t};
