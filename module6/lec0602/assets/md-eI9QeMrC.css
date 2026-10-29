@@ -1,0 +1,78 @@
+
+.cover[data-v-97c7c821] {
+  --maroon: var(--vt-maroon, #861F41);
+  --orange: var(--vt-orange, #E5751F);
+
+  box-sizing: border-box;
+  position: relative;
+  height: 100%;
+  padding: 40px 64px;
+
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+.logo[data-v-97c7c821] {
+  align-self: flex-end;
+  height: 26px;
+  width: auto;
+}
+.content-row[data-v-97c7c821] {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 48px;
+}
+.text-block[data-v-97c7c821] {
+  max-width: 34em;
+}
+.text-block h1[data-v-97c7c821] {
+  margin: 0;
+  font-size: 3.30rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: black;
+  font-family: Georgia, 'Times New Roman', serif;
+}
+.lecture-line[data-v-97c7c821] {
+  margin: 8px 0 0;
+  font-size: 1.9rem;
+  font-weight: 500;
+  color: var(--maroon);
+}
+.presenter[data-v-97c7c821] {
+  margin-top: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.department[data-v-97c7c821] {
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--maroon);
+  white-space: pre-line;
+}
+.instructor-name[data-v-97c7c821] {
+  font-size: 1.25rem;
+  color: black;
+}
+.email[data-v-97c7c821] {
+  font-size: 1.1rem;
+  color: var(--orange);
+  text-decoration: underline;
+  width: fit-content;
+}
+.date[data-v-97c7c821] {
+  font-size: 1.05rem;
+  color: #888;
+}
+.instructor-photo[data-v-97c7c821] {
+  flex: none;
+  width: 210px;
+  height: 266px;
+  object-fit: cover;
+  border-radius: 20px;
+  margin-top: 60px;
+}
