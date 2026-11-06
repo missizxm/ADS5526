@@ -1,0 +1,578 @@
+---
+title: "Lab: Ensemble Tree Methods in R"
+subtitle: "Bagging, Random Forests, Boosting, and Stacking"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: false
+    df-print: paged
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+In this lab, you will fit and compare tree-based ensemble methods in R using the `tidymodels` ecosystem.
+
+We will use the employee attrition data from the `modeldata` package to predict whether an employee leaves the company. This is a non-trivial classification problem: it has many predictors, categorical variables, class imbalance, and enough noise that model comparisons are meaningful.
+
+### Learning goals
+
+By the end of this lab, you should be able to:
+
+1. Fit bagged trees, random forests, boosted trees, and stacked ensembles in R.
+2. Identify the most important tuning arguments for each method.
+3. Compare ensemble models using resampling-based and held-out test-set performance estimates.
+4. Compute accuracy, precision, recall, and multiclass/binary log loss using a common metric workflow.
+5. Explain what the `stacks` package does, and what kind of stacking it does *not* implement.
+
+## 1. Setup
+
+```{r}
+# Install packages if needed:
+# install.packages(c(
+#   "tidymodels", "modeldata", "ranger", "xgboost", "baguette", "stacks", "forcats"
+# ))
+
+library(tidymodels)
+library(forcats)
+library(modeldata)
+library(baguette)
+library(stacks)
+
+tidymodels_prefer()
+set.seed(2026)
+```
+
+```{r}
+data(attrition)
+
+glimpse(attrition)
+```
+
+The outcome variable is `Attrition`, where `Yes` means that the employee left the company. Because this is the outcome we usually care about most, we place `Yes` as the first factor level. In `yardstick`, binary precision and recall use the first level as the event by default.
+
+```{r}
+attrition_clean <- attrition |>
+  mutate(Attrition = fct_relevel(Attrition, "Yes"))
+
+attrition_clean |>
+  count(Attrition) |>
+  mutate(prop = n / sum(n))
+```
+
+### Train/test split
+
+```{r}
+attrition_split <- initial_split(attrition_clean, prop = 0.80, strata = Attrition)
+attrition_train <- training(attrition_split)
+attrition_test  <- testing(attrition_split)
+
+attrition_folds <- vfold_cv(attrition_train, v = 5, strata = Attrition)
+```
+
+## 2. Exploratory visualizations for preprocessing
+
+Before fitting models, we should inspect the training data only. This avoids letting the test set influence modeling choices.
+
+For this lab, the goal of the visualizations is not just to make attractive plots. We want to look for features of the problem that suggest flexible tree-based methods may be useful:
+
+- class imbalance,
+- nonlinear relationships between predictors and attrition,
+- sharp threshold effects,
+- categorical predictors with different attrition rates,
+- interactions between predictors.
+
+### Outcome balance
+
+```{r}
+attrition_train |>
+  count(Attrition) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = Attrition, y = prop, fill = Attrition)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(prop, accuracy = 0.1)), vjust = -0.25) +
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1)) +
+  labs(
+    title = "Attrition is an imbalanced classification problem",
+    x = NULL,
+    y = "Proportion of training data"
+  )
+```
+
+Accuracy can look good when the outcome is imbalanced. For this reason, we will also use precision, recall, and log loss.
+
+### Numeric predictors by attrition status
+
+```{r}
+numeric_eda <- attrition_train |>
+  select(Attrition, Age, MonthlyIncome, DistanceFromHome, TotalWorkingYears) |>
+  pivot_longer(-Attrition, names_to = "predictor", values_to = "value")
+
+numeric_eda |>
+  ggplot(aes(x = Attrition, y = value, fill = Attrition)) +
+  geom_boxplot(alpha = 0.75, outlier_alpha = 0.3, show.legend = FALSE) +
+  facet_wrap(~ predictor, scales = "free_y") +
+  labs(
+    title = "Several numeric predictors differ by attrition status",
+    x = NULL,
+    y = NULL
+  )
+```
+
+Boxplots help us identify predictors that may separate the classes. Tree-based methods can use these predictors by creating split points such as `MonthlyIncome < some value` or `DistanceFromHome >= some value`.
+
+### Binned attrition rates for continuous predictors
+
+```{r}
+binned_numeric_rates <- attrition_train |>
+  mutate(attrition_event = Attrition == "Yes") |>
+  select(attrition_event, Age, MonthlyIncome, DistanceFromHome, TotalWorkingYears) |>
+  pivot_longer(-attrition_event, names_to = "predictor", values_to = "value") |>
+  group_by(predictor) |>
+  mutate(bin = factor(ntile(value, 6))) |>
+  ungroup() |>
+  group_by(predictor, bin) |>
+  summarize(
+    attrition_rate = mean(attrition_event),
+    n = n(),
+    .groups = "drop"
+  )
+
+binned_numeric_rates |>
+  ggplot(aes(x = bin, y = attrition_rate, group = predictor)) +
+  geom_col(fill = "#4C78A8") +
+  facet_wrap(~ predictor, scales = "free_x") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Binned event rates reveal nonlinear patterns and potential split points",
+    x = "Predictor bins",
+    y = "Attrition rate"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+This type of plot is especially useful for tree-based methods. If the attrition rate changes sharply across bins, a tree can represent that pattern with one or more splits. Linear models may need transformations or interaction terms to capture the same structure.
+
+### Categorical predictors and attrition rates
+
+```{r}
+categorical_rates <- attrition_train |>
+  mutate(attrition_event = Attrition == "Yes") |>
+  select(attrition_event, OverTime, BusinessTravel, JobRole, MaritalStatus) |>
+  pivot_longer(-attrition_event, names_to = "predictor", values_to = "level") |>
+  group_by(predictor, level) |>
+  summarize(
+    attrition_rate = mean(attrition_event),
+    n = n(),
+    .groups = "drop"
+  ) |>
+  filter(n >= 10)
+
+categorical_rates |>
+  ggplot(aes(x = fct_reorder(level, attrition_rate), y = attrition_rate)) +
+  geom_col(fill = "#F58518") +
+  coord_flip() +
+  facet_wrap(~ predictor, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Categorical predictors have different attrition rates across levels",
+    x = NULL,
+    y = "Attrition rate"
+  )
+```
+
+Categorical predictors are often important in tree-based models because individual levels or groups of levels can define high-risk segments.
+
+### Interaction patterns
+
+```{r}
+interaction_rates <- attrition_train |>
+  mutate(
+    attrition_event = Attrition == "Yes",
+    age_group = ntile(Age, 6),
+    age_group = factor(
+      age_group,
+      levels = 1:6,
+      labels = 1:6
+    ),
+    income_group = ntile(MonthlyIncome, 4),
+    income_group = factor(
+      income_group,
+      levels = 1:4,
+      labels = c("Lowest income", "Lower-middle", "Upper-middle", "Highest income")
+    )
+  ) |>
+  group_by(age_group, income_group) |>
+  summarize(
+    attrition_rate = mean(attrition_event),
+    n = n(),
+    .groups = "drop"
+  )
+
+interaction_rates |>
+  ggplot(aes(x = income_group, y = attrition_rate, fill = age_group)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  geom_text(
+    aes(label = n),
+    position = position_dodge(width = 0.8),
+    vjust = -0.25,
+    size = 3
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Attrition risk may depend on combinations of predictors",
+    subtitle = "Bar labels show the number of employees in each subgroup",
+    x = "Monthly income group",
+    y = "Attrition rate",
+    fill = "Age Group"
+  )
+```
+
+This plot illustrates why trees can be powerful for this problem. A tree can first split on `Age`, then split again on `MonthlyIncome`, allowing the effect of income to differ for employees who do and do not work overtime. Random forests and boosted trees average or sequence many such interaction-based trees.
+
+## 3. Shared preprocessing recipe and metrics
+
+We will use the same recipe and the same metrics for all models so that the performance comparison is fair.
+
+```{r}
+attrition_rec <- recipe(Attrition ~ ., data = attrition_train) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+```
+
+We will evaluate the models using four metrics.
+
+| Metric | What it measures | Why it matters here |
+|---|---|---|
+| `accuracy` | Overall proportion classified correctly | Easy to interpret, but can be misleading with imbalanced outcomes |
+| `precision` | Of the employees predicted to leave, how many actually left? | Penalizes false alarms |
+| `recall` | Of the employees who actually left, how many did we identify? | Penalizes missed attrition cases |
+| `mn_log_loss` | Quality of the predicted class probabilities | Rewards calibrated probabilities, not just hard classifications |
+
+```{r}
+classification_metrics <- metric_set(
+  accuracy,
+  precision,
+  recall,
+  mn_log_loss
+)
+```
+
+## 4. Bagging
+
+Bagging, or bootstrap aggregation, fits many trees to bootstrap samples of the training data and averages their predictions.
+
+### Important arguments
+
+| Argument | Meaning |
+|---|---|
+| `times` | Number of bootstrap trees to fit. More trees usually reduce variance but increase computation time. |
+| `min_n` | Minimum number of observations required to split or continue splitting a node. Larger values produce shallower, smoother trees. |
+| engine | In this lab, `set_engine("rpart")` uses bagged CART-style trees through the `baguette` package. |
+
+```{r}
+bag_spec <- bag_tree(
+  min_n = 10
+) |>
+  set_engine("rpart", times = 100) |>
+  set_mode("classification")
+
+bag_wf <- workflow() |>
+  add_recipe(attrition_rec) |>
+  add_model(bag_spec)
+
+bag_rs <- fit_resamples(
+  bag_wf,
+  resamples = attrition_folds,
+  metrics = classification_metrics,
+  control = control_stack_resamples()
+)
+
+collect_metrics(bag_rs)
+```
+
+## 5. Random forests
+
+Random forests improve on bagging by randomly selecting a subset of predictors at each split. This decorrelates the trees, which can improve the ensemble.
+
+### Important arguments
+
+| Argument | Meaning |
+|---|---|
+| `trees` | Number of trees. Often 500+ in serious analyses. |
+| `mtry` | Number of predictors randomly considered at each split. Smaller values make trees less correlated. |
+| `min_n` | Minimum node size. Larger values make individual trees less complex. |
+| `importance` | Engine argument for computing variable importance. With `ranger`, use `importance = "impurity"` or `"permutation"`. |
+
+```{r}
+rf_spec <- rand_forest(
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) |>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("classification")
+
+rf_wf <- workflow() |>
+  add_recipe(attrition_rec) |>
+  add_model(rf_spec)
+
+rf_grid <- grid_latin_hypercube(
+  mtry(range = c(2, 30)),
+  min_n(range = c(2, 30)),
+  size = 50
+)
+
+rf_rs <- tune_grid(
+  rf_wf,
+  resamples = attrition_folds,
+  grid = rf_grid,
+  metrics = classification_metrics,
+  control = control_stack_grid()
+)
+
+show_best(rf_rs, metric = "recall")
+```
+
+```{r}
+best_rf <- select_best(rf_rs, metric = "recall")
+best_rf
+```
+
+## 6. Boosting
+
+Boosting builds trees sequentially. Each new tree focuses on correcting mistakes made by the previous trees.
+
+In this lab, we use gradient boosted trees through `xgboost`.
+
+### Important arguments
+
+| Argument | Meaning |
+|---|---|
+| `trees` | Number of boosting iterations. |
+| `tree_depth` | Maximum depth of each tree. Smaller values often work well in boosting. |
+| `learn_rate` | Shrinkage parameter controlling how much each tree contributes. Smaller values often require more trees. |
+| `loss_reduction` | Minimum improvement required to make an additional split. In `xgboost`, this corresponds to `gamma`. |
+| `min_n` | Minimum number of observations required in a terminal node. |
+| `sample_size` | Fraction of training observations used in each boosting iteration. |
+| `mtry` | Number or proportion of predictors sampled before fitting each tree. |
+
+The same `classification_metrics` object works for boosted trees because we ask `tune_grid()` to compute both class-based metrics, such as precision and recall, and probability-based metrics, such as log loss. The helper functions later in the lab also avoid hard-coding class probability column names.
+
+```{r}
+boost_spec <- boost_tree(
+  trees = 400,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  min_n = tune()
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+boost_wf <- workflow() |>
+  add_recipe(attrition_rec) |>
+  add_model(boost_spec)
+
+boost_grid <- grid_latin_hypercube(
+  tree_depth(range = c(1, 6)),
+  learn_rate(range = c(-4, -1)),
+  loss_reduction(),
+  min_n(range = c(2, 30)),
+  size = 100
+)
+
+boost_rs <- tune_grid(
+  boost_wf,
+  resamples = attrition_folds,
+  grid = boost_grid,
+  metrics = classification_metrics,
+  control = control_stack_grid()
+)
+
+show_best(boost_rs, metric = "recall")
+```
+
+```{r}
+best_boost <- select_best(boost_rs, metric = "recall")
+best_boost
+```
+
+## 7. Stacking
+
+Stacking trains multiple models and then trains a meta-learner that combines their predictions.
+
+Here, we stack the bagged trees, random forest candidates, and boosted tree candidates.
+
+```{r}
+attrition_stack <- stacks() |>
+  add_candidates(bag_rs) |>
+  add_candidates(rf_rs) |>
+  add_candidates(boost_rs)
+
+attrition_stack
+```
+
+```{r}
+set.seed(2026)
+attrition_stack_blend <- attrition_stack |>
+  blend_predictions(metric = metric_set(recall))
+
+attrition_stack_blend
+```
+
+```{r}
+attrition_stack_fit <- attrition_stack_blend |>
+  fit_members()
+```
+
+### What kind of stacking is this?
+
+The `stacks` package fits a regularized linear meta-learner to combine the candidate model predictions. In other words, the fitted stack learns a set of global coefficients for the candidate predictions. There are algorithms that will allow weights to vary across the sample space, e.g. feature-weighted linear stacking, but currently none are implemented out of the box to work with `tidymodels`, and would need to be built manually. The process isn't overly difficult, you would just need to pass the out-of-fold predictions and the original features to a non-linear learner such as a random forest or neural network.
+
+## 8. Fold-by-fold resampling comparison
+
+Before evaluating the final models on the held-out test set, compare performance across the cross-validation folds.
+
+For bagging, there is only one model specification. For random forests and boosting, we first select the best tuning parameter combination and then report that model's performance on each fold.
+
+```{r}
+bag_fold_metrics <- collect_metrics(bag_rs, summarize = FALSE) |>
+  mutate(model = "Bagged trees") |>
+  select(model, id, .metric, .estimate)
+
+rf_fold_metrics <- collect_metrics(rf_rs, summarize = FALSE) |>
+  inner_join(best_rf, by = c("mtry", "min_n", ".config")) |>
+  mutate(model = "Random forest") |>
+  select(model, id, .metric, .estimate)
+
+boost_fold_metrics <- collect_metrics(boost_rs, summarize = FALSE) |>
+  inner_join(
+    best_boost,
+    by = c("tree_depth", "learn_rate", "loss_reduction", "min_n", ".config")
+  ) |>
+  mutate(model = "Boosted trees") |>
+  select(model, id, .metric, .estimate)
+
+fold_metrics <- bind_rows(
+  bag_fold_metrics,
+  rf_fold_metrics,
+  boost_fold_metrics
+) |>
+  pivot_wider(names_from = .metric, values_from = .estimate) |>
+  arrange(id, model)
+
+fold_metrics
+```
+
+```{r}
+fold_metrics |>
+  group_by(model) |>
+  summarize(
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    sd_accuracy = sd(accuracy, na.rm = TRUE),
+    mean_precision = mean(precision, na.rm = TRUE),
+    sd_precision = sd(precision, na.rm = TRUE),
+    mean_recall = mean(recall, na.rm = TRUE),
+    sd_recall = sd(recall, na.rm = TRUE),
+    mean_log_loss = mean(mn_log_loss, na.rm = TRUE),
+    sd_log_loss = sd(mn_log_loss, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(mean_recall), desc(mean_precision), mean_log_loss)
+```
+
+The stacked model uses the resampled predictions from the base models to train a meta-learner. A fully independent fold-by-fold estimate for the stacked model would require nested resampling, which is beyond this short lab. We will still evaluate the fitted stack on the held-out test set below.
+
+## 9. Final test-set comparison
+
+Now evaluate the selected models on the held-out test set.
+
+```{r}
+# Finalize and fit the random forest
+final_rf_wf <- finalize_workflow(rf_wf, best_rf)
+final_rf_fit <- fit(final_rf_wf, data = attrition_train)
+
+# Finalize and fit the boosted tree
+final_boost_wf <- finalize_workflow(boost_wf, best_boost)
+final_boost_fit <- fit(final_boost_wf, data = attrition_train)
+
+# Fit bagged tree workflow
+final_bag_fit <- fit(bag_wf, data = attrition_train)
+```
+
+The evaluation helper below works for all of the fitted models, including the boosted tree model. It does not hard-code class probability column names. Instead, it finds the probability columns returned by `predict(type = "prob")` and passes them to the shared metric set.
+
+```{r}
+make_class_predictions <- function(fit, test_data) {
+  predict(fit, test_data, type = "class") |>
+    bind_cols(predict(fit, test_data, type = "prob")) |>
+    bind_cols(test_data |> select(Attrition))
+}
+
+eval_class_model <- function(fit, test_data, model_name) {
+  preds <- make_class_predictions(fit, test_data)
+
+  event_level <- levels(preds$Attrition)[1]
+  event_prob_col <- paste0(".pred_", event_level)
+
+  class_results <- metric_set(accuracy, precision, recall)(
+    preds,
+    truth = Attrition,
+    estimate = .pred_class
+  )
+
+  log_loss_results <- rlang::inject(
+    mn_log_loss(
+      preds,
+      truth = Attrition,
+      !!rlang::sym(event_prob_col)
+    )
+  )
+
+  bind_rows(class_results, log_loss_results) |>
+    mutate(model = model_name)
+}
+
+bag_test   <- eval_class_model(final_bag_fit, attrition_test, "Bagged trees")
+rf_test    <- eval_class_model(final_rf_fit, attrition_test, "Random forest")
+boost_test <- eval_class_model(final_boost_fit, attrition_test, "Boosted trees")
+stack_test <- eval_class_model(attrition_stack_fit, attrition_test, "Stacked ensemble")
+
+test_metrics <- bind_rows(bag_test, rf_test, boost_test, stack_test) |>
+  select(model, .metric, .estimate) |>
+  pivot_wider(names_from = .metric, values_from = .estimate) |>
+  arrange(desc(recall), desc(precision), mn_log_loss)
+
+test_metrics
+```
+
+```{r}
+test_metrics |>
+  mutate(
+    rank_accuracy = min_rank(desc(accuracy)),
+    rank_precision = min_rank(desc(precision)),
+    rank_recall = min_rank(desc(recall)),
+    rank_log_loss = min_rank(mn_log_loss)
+  ) |>
+  arrange(rank_recall, rank_precision, rank_log_loss)
+```
+
+## 10. Variable importance
+
+Because we fit the random forest with the `ranger` engine and requested impurity-based importance, we can extract the importance values directly from the fitted engine object. Variable importance tells us which variables contributed the most to the final predictions, but it does not tell us what direction the relationship is in (importantly, since this is a tree-based method, the idea of *direction* doesn't even make sense).
+
+```{r}
+rf_engine <- extract_fit_engine(final_rf_fit)
+
+tibble(
+  variable = names(rf_engine$variable.importance),
+  importance = as.numeric(rf_engine$variable.importance)
+) |>
+  arrange(desc(importance))
+```
