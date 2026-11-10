@@ -1,0 +1,1 @@
+import{B as e,L as t,X as n,_ as r}from"./modules/shiki-Bre5ujuJ.js";import{nt as i}from"./index-BPwWMsIs.js";import{t as a}from"./vt-default-BgDMbeb4.js";var o={__name:`default`,setup(o){let{$slidev:s,$nav:c,$clicksContext:l,$clicks:u,$page:d,$renderContext:f,$frontmatter:p}=i();return(i,o)=>(t(),r(a,null,{default:n(()=>[e(i.$slots,`default`)]),_:3}))}};export{o as t};
